@@ -1,0 +1,590 @@
+---
+title: "ANALYSE DES MORSURES DE CHIENS EN TANZANIE"
+author: "Rokhaya Diop"
+date: "2025-09-2"
+output:
+   pdf_document:
+    toc: true
+    number_sections: true
+    fig_caption: true
+    latex_engine: xelatex
+---
+
+```{r}
+suppressPackageStartupMessages({
+library(conflicted)
+library(tidyverse)
+library(data.table)
+library(lubridate)
+library(sf)
+library(spdep)
+library(tmap)
+library(glmmTMB)  
+library(pscl)
+library(AER)
+library(Matrix)
+library(broom.mixed)
+library(caret)
+library(pROC)
+library(patchwork)
+library(viridis)
+
+
+library(ggplot2)
+library(Metrics)
+library(readr)
+library(ggspatial)
+library(RColorBrewer) 
+ 
+# Gestion des conflits
+conflict_prefer("filter", "dplyr")
+conflict_prefer("expand", "tidyr")
+conflicts_prefer(dplyr::lag)
+
+})
+```
+
+
+```{r}
+df <- read.csv("/Users/DELL/Documents/Thesis_AIMS/S_data/Bite_death_WD_cov.csv")
+
+ward_sf <- st_read("/Users/DELL/Documents/Thesis_AIMS/S_data/Ward.shp") 
+```
+
+```{r}
+plot(ward_sf["District_N"], main = "Ulanga and Kilombero Districts map")
+
+```
+
+```{r}
+# Standardization of ward codes
+
+max_nchar <- max(nchar(ward_sf$Ward_Code))
+
+df <- df %>%
+  mutate(
+    Ward_Cd = stringr::str_pad(Ward_Cd, width = max_nchar, side = "left", pad = "0"),
+    Date = as_date(Date),
+    Yr_bttn = as.integer(Yr_bttn),
+    Mnth_bt = as.integer(Mnth_bt),
+    ttl_bth = as.numeric(ttl_bth),
+    dogpop = as.numeric(dogpop),
+    vdogs = as.numeric(vdogs),
+    pop_den = as.numeric(pop_den),
+    pvrty_n = as.numeric(pvrty_n),
+    dog_vacc_cov = ifelse(!is.na(vdogs)& !is.na(dogpop) & dogpop > 0, vdogs / dogpop, NA_real_)
+  ) %>%
+  mutate(
+    ttl_bth = ifelse(is.na(ttl_bth), 0, ttl_bth),
+    bit_cnt = ifelse(is.na(bit_cnt), 0, bit_cnt)
+  )
+```
+
+
+```{r}
+prop_zero <- function(x) mean(x == 0, na.rm = TRUE) * 100
+cat("Proportion of zeros in bit_cnt =", prop_zero(df$bit_cnt), "%\n")
+cat("Proportion of zeros in vdogs =", prop_zero(df$vdogs), "%\n")
+mean_bit <- mean(df$bit_cnt, na.rm = TRUE)
+var_bit <- var(df$bit_cnt, na.rm = TRUE)
+cat("Mean =", mean_bit, "| Variance =", var_bit, "\n")
+if (var_bit > mean_bit) cat("Overdispersed data\n")
+```
+```{r}
+# Histograms
+p1 <- ggplot(df, aes(bit_cnt)) +
+geom_histogram(binwidth = 1, fill = "steelblue", color = "black") +
+labs(title = "Bite Distribution", x = "Number of Bites", y = "Frequency")
+
+p2 <- ggplot(df, aes(vdogs)) +
+geom_histogram(binwidth = 5, fill = "darkgreen", color = "black") +
+labs(title = "Distribution of Vaccinated Dogs", x = "Number of Vaccinated Dogs", y = "Frequency")
+
+p1 +p2
+```
+
+```{r}
+heat <- df %>%
+  filter(Dstrc_N %in% c("Ulanga", "Kilombero")) %>%
+  group_by(Dstrc_N, Yr_bttn, Mnth_bt) %>%
+  summarise(
+    bites = sum(bit_cnt, na.rm = TRUE),
+    vdogs = sum(vdogs, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+heat_general <- heat %>%
+  group_by(Yr_bttn, Mnth_bt) %>%
+  summarise(
+    bites = sum(bites, na.rm = TRUE),
+    vdogs = sum(vdogs, na.rm = TRUE),
+    .groups = "drop"
+  )
+g_bites_general <- ggplot(heat_general, 
+                          aes(x = Yr_bttn, y = Mnth_bt, fill = bites)) +
+  geom_tile(color = "grey80", linewidth = 0.3) +
+  geom_text(aes(label = bites), size = 3) +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  scale_x_continuous(breaks = seq(min(heat_general$Yr_bttn),
+                                  max(heat_general$Yr_bttn), 1)) +
+  scale_y_continuous(breaks = 1:12) +
+  labs(
+    title = "General Heatmap of Dog Bites (2006–2025)",
+    subtitle = "Total number of bites per month and year",
+    x = "Year",
+    y = "Month",
+    fill = "Bites"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold"))
+g_vdogs_general <- ggplot(heat_general, 
+                          aes(x = Yr_bttn, y = Mnth_bt, fill = vdogs)) +
+  geom_tile(color = "grey80", linewidth = 0.3) +
+  geom_text(aes(label = vdogs), size = 3) +
+  scale_fill_viridis_c(option = "plasma", direction = -1) +
+  scale_x_continuous(breaks = seq(min(heat_general$Yr_bttn),
+                                  max(heat_general$Yr_bttn), 1)) +
+  scale_y_continuous(breaks = 1:12) +
+  labs(
+    title = "General Heatmap of Dog Vaccination (2006–2025)",
+    subtitle = "Total number of vaccinated dogs per month and year",
+    x = "Year",
+    y = "Month",
+    fill = "Vaccinated dogs"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold"))
+plot_heat_district <- function(data, district_name, variable = "bites") {
+  
+  heat_d <- data %>% 
+    filter(Dstrc_N == district_name)
+  
+  g <- ggplot(heat_d,
+              aes(x = Yr_bttn, y = Mnth_bt,
+                  fill = .data[[variable]])) +
+    geom_tile(color = "grey80", linewidth = 0.3) +
+    geom_text(aes(label = .data[[variable]]), size = 3) +
+    scale_fill_viridis_c(option = "plasma", direction = -1) +
+    scale_x_continuous(breaks = seq(min(heat_d$Yr_bttn),
+                                    max(heat_d$Yr_bttn), 1)) +
+    scale_y_continuous(breaks = 1:12) +
+    labs(
+      title = paste(district_name, "—", variable, "(2006–2025)"),
+      subtitle = paste("Monthly total of", variable),
+      x = "Year",
+      y = "Month",
+      fill = variable
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(face = "bold"))
+  
+  return(g)
+}
+g_ulanga_bites      <- plot_heat_district(heat, "Ulanga", "bites")
+g_ulanga_vdogs      <- plot_heat_district(heat, "Ulanga", "vdogs")
+
+g_kilombero_bites   <- plot_heat_district(heat, "Kilombero", "bites")
+g_kilombero_vdogs   <- plot_heat_district(heat, "Kilombero", "vdogs")
+
+g_bites_general
+g_vdogs_general
+
+g_ulanga_bites
+g_ulanga_vdogs
+
+g_kilombero_bites
+g_kilombero_vdogs
+```
+```{r}
+
+season_data <- df%>%
+  group_by(Mnth_bt) %>%
+  summarise(total_bites = sum(bit_cnt, na.rm = TRUE)) %>%
+  mutate(Month = factor(Mnth_bt, levels = 1:12, 
+                        labels = month.abb))  
+
+
+ggplot(season_data, aes(x = Month, y = total_bites, fill = total_bites)) +
+  geom_bar(stat = "identity", width = 1, color = "white") +
+  coord_polar(start = -pi/12) +
+  scale_fill_viridis_c(option = "C") +
+  theme_minimal() +
+  labs(title = "Seasonality of rabies bites (2006-2025)",
+
+              y = "Number of bites", x = "")
+```
+
+```{r}
+
+taux_ref_year <- df %>%
+  group_by(Yr_bttn) %>%
+  summarise(
+    total_bites = sum(bit_cnt, na.rm = TRUE),
+    total_pop   = sum(ttl_bth, na.rm = TRUE),
+    taux_ref_Y  = ifelse(total_pop > 0, total_bites / total_pop, 0),
+    .groups = "drop"
+  )
+
+
+sir_year <- df %>%
+  group_by(Yr_bttn, wwid, Ward_Cd) %>%
+  summarise(
+    bit_cnt       = sum(bit_cnt, na.rm = TRUE),
+    ttl_bth       = sum(ttl_bth, na.rm = TRUE),
+    dogpop        = mean(dogpop, na.rm = TRUE),
+    pop_den       = mean(pop_den, na.rm = TRUE),
+    dog_vacc_cov  = mean(dog_vacc_cov, na.rm = TRUE),
+    totl_ml       = mean(totl_ml, na.rm = TRUE),
+    totl_fm       = mean(totl_fm, na.rm = TRUE),
+    Ar_kmsq       = mean(Ar_kmsq, na.rm = TRUE),
+    dth_cnt       = sum(dth_cnt, na.rm = TRUE),
+    prtctd_       = mean(prtctd_, na.rm = TRUE),
+    lnd_cvr       = mean(lnd_cvr, na.rm = TRUE),
+    pvrty_n       = mean(pvrty_n, na.rm = TRUE),
+    elevatn       = mean(elevatn, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+    left_join(taux_ref_year, by = "Yr_bttn") %>%
+  mutate(
+    bit_exp = taux_ref_Y * ttl_bth,
+    SIR     = ifelse(bit_exp > 0, bit_cnt / bit_exp, 0)
+  )
+
+```
+
+     
+```{r}
+map_data <- ward_sf %>%
+  left_join(sir_year, by = c("wwid" = "wwid"))
+```
+
+
+
+```{r}
+ggplot(map_data) +
+  geom_sf(aes(fill = SIR)) +
+  facet_wrap(~ Yr_bttn, dir = "h", ncol = 7) +
+  ggtitle("SIR") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradientn(
+    colors = c("blue", "white", "red"),
+    limits = c(0, 2),
+    breaks = seq(0, 2, by = 0.5),
+    values = scales::rescale(c(0, 1, 2)),
+    oob = scales::squish,
+    na.value = "grey50"
+  )
+
+```
+
+
+```{r}
+g4 <- sir_year %>%
+group_by(Yr_bttn) %>%
+summarize(mean_bite = mean(SIR, na.rm=TRUE),
+mean_cov = mean(dog_vacc_cov, na.rm=TRUE)) %>%
+ggplot(aes(x=mean_cov, y=mean_bite)) +
+geom_point() + geom_smooth(method="lm") +
+labs(title="SIR relationship - Vaccination by year",
+x="dog vaccination coverage", y="Average SIR by year")
+
+print(g4)
+```
+
+
+```{r}
+sir_year <- sir_year %>%
+  group_by(Ward_Cd) %>%
+  arrange(Yr_bttn) %>%
+  mutate(
+    vacc_lag1  = lag(dog_vacc_cov, 1),
+    vacc_lag2  = lag(dog_vacc_cov, 2),
+    vacc_lag3  = lag(dog_vacc_cov, 3),
+    vacc_lag4  = lag(dog_vacc_cov, 4),
+    vacc_lag12 = lag(dog_vacc_cov, 12)
+  ) %>%
+  ungroup()
+```
+
+
+
+
+
+
+```{r}
+nb <- poly2nb(ward_sf)
+head(nb)
+
+nb2INLA("ward_sf.adj", nb)
+g <- inla.read.graph(filename = "ward_sf.adj")
+```
+
+```{r}
+summary(g)
+```
+
+
+
+
+```{r}
+inla_df <- sir_year %>%
+  mutate(
+    id_spatial = as.integer(as.factor(Ward_Cd)),
+    id_time = as.integer(as.factor(Yr_bttn)),
+    observed = bit_cnt,               
+    expected = bit_exp , 
+    offset_log = log(pmax(expected, 0.1))  
+  ) %>%
+   mutate(across(c(
+    elevatn, Ar_kmsq, dogpop, pop_den,
+    totl_ml, totl_fm, prtctd_, lnd_cvr,
+    pvrty_n, ttl_bth,
+    vacc_lag1, vacc_lag2, vacc_lag3,
+    vacc_lag4, vacc_lag12
+  ), scale)) %>%
+  mutate(id_st = as.integer(interaction(id_spatial, id_time, drop=TRUE)))
+
+covariates <- c("elevatn", "pvrty_n", "dogpop", 
+                "pop_den", "Ar_kmsq", "totl_ml", "totl_fm", 
+                "prtctd_", "lnd_cvr", "ttl_bth")
+
+
+build_formula <- function(vars) {
+  f <- paste(vars, collapse = " + ")
+  formula_text <- paste0(
+    "observed ~ -1 + ",
+    "f(id_spatial, model='bym2', graph=g) + ",
+    "f(id_time, model='rw1') + ",
+    "f(id_st, model='iid') + ",
+    f, " + offset(offset_log)"
+  )
+  as.formula(formula_text)
+}
+
+selection_results <- data.frame(
+  n_vars = integer(),
+  Covariates = character(),
+  Family = character(),
+  DIC = numeric(),
+  WAIC = numeric(),
+  stringsAsFactors = FALSE
+)
+
+for (i in seq_along(covariates)) {
+  
+  vars <- covariates[1:i]
+  formula_tmp <- build_formula(vars)
+  
+  cat("=== Running INLA with covariates:", paste(vars, collapse = ", "), "===\n")
+  
+  families <- c("nbinomial", "zeroinflatednbinomial1", "zeroinflatednbinomial2")
+  
+  for (fam in families) {
+    cat("→ Running INLA for family:", fam, "\n")
+    
+    try({
+      res <- inla(
+        formula = formula_tmp,
+        family = fam,
+        data = inla_df,
+        control.predictor = list(compute = TRUE),
+        control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, return.marginals.predictor = TRUE)
+      )
+      
+      selection_results <- rbind(
+        selection_results,
+        data.frame(
+          n_vars = length(vars),
+          Covariates = paste(vars, collapse = ", "),
+          Family = fam,
+          DIC = res$dic$dic,
+          WAIC = res$waic$waic,
+          stringsAsFactors = FALSE
+        )
+      )
+    }, silent = TRUE)
+  }
+}
+
+
+best_index <- which.min(selection_results$DIC)
+cat("\n=== Meilleure formule selon le DIC ===\n")
+cat("Covariables :", selection_results$Covariates[best_index], "\n")
+cat("Famille :", selection_results$Family[best_index], "\n")
+cat("DIC :", selection_results$DIC[best_index], "\n")
+cat("WAIC :", selection_results$WAIC[best_index], "\n")
+
+best_covariates <- strsplit(selection_results$Covariates[best_index], ",\\s*")[[1]]
+best_family <- selection_results$Family[best_index]
+best_formula <- build_formula(best_covariates)
+
+
+best_model <- inla(
+  formula = best_formula,
+  family = best_family,
+  data = inla_df,
+  control.predictor = list(compute = TRUE),
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, return.marginals.predictor = TRUE)
+)
+```
+```{r}
+print(selection_results)
+```
+
+
+
+```{r}
+summary(best_model)
+```
+
+```{r}
+best_model$summary.fixed
+```
+
+```{r}
+build_formula_lag <- function(lag_var, covars){
+
+  rhs <- paste(c(lag_var, covars), collapse=" + ")
+
+  as.formula(paste0(
+    "observed ~ -1 + ",
+    "f(id_spatial, model='bym2', graph=g) + ",
+    "f(id_time, model='rw1') + ",
+    "f(id_st, model='iid') + ",
+    rhs, " + offset(offset_log)"
+  ))
+}
+```
+
+
+
+```{r}
+lag_results <- data.frame()
+
+for(lag in vacc_lags){
+
+  cat("Testing:", lag, "\n")
+
+  formula_tmp <- build_formula_lag(lag, best_covariates)
+
+  res <- inla(
+    formula_tmp,
+    family = best_family,
+    data = inla_df,
+    control.compute=list(dic=TRUE, waic=TRUE)
+  )
+
+  beta_mean  <- res$summary.fixed[lag, "mean"]
+  beta_low   <- res$summary.fixed[lag, "0.025quant"]
+  beta_high  <- res$summary.fixed[lag, "0.975quant"]
+
+  lag_results <- rbind(
+    lag_results,
+    data.frame(
+      Lag = lag,
+      Beta = beta_mean,
+      CI_low = beta_low,
+      CI_high = beta_high,
+      DIC = res$dic$dic,
+      WAIC = res$waic$waic
+    )
+  )
+}
+```
+```{r}
+lag_results$beta_CI <- paste0(
+  round(lag_results$Beta,3),
+  " (",
+  round(lag_results$CI_low,3),
+  ", ",
+  round(lag_results$CI_high,3),
+  ")"
+)
+```
+
+```{r}
+lag_results
+```
+
+
+```{r}
+c_thr <- 2
+
+
+marg_rr <- best_model$marginals.fitted.values  
+
+
+exc_prob <- vapply(
+  marg_rr,
+  function(m) 1 - inla.pmarginal(q = c_thr, marginal = m),
+  numeric(1)
+)
+
+inla_df$Exceedance_probability <- exc_prob
+```
+
+
+
+
+```{r}
+inla_df$RR_mean <- best_model$summary.fitted.values$mean
+inla_df$RR_LL <- best_model$summary.fitted.values$`0.025quant`
+inla_df$RR_UL<- best_model$summary.fitted.values$`0.975quant`
+```
+
+
+```{r}
+
+ward_year <- ward_sf %>%
+  left_join(inla_df, by = "wwid")
+
+ggplot(ward_year) +
+  geom_sf(aes(fill = Exceedance_probability)) +
+  facet_wrap(~Yr_bttn, dir = "h", ncol = 7) +
+  ggtitle("Exceedance Probability") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradientn(
+    colors = c("blue", "white", "red"),
+    values = scales::rescale(c(min(ward_year$Exceedance_probability), 0.5, max(ward_year$Exceedance_probability))),
+    na.value = "grey50"
+  )
+```
+
+
+```{r}
+
+ward_year <- ward_sf %>%
+  left_join(inla_df, by = "wwid")
+
+ggplot(ward_year) +
+  geom_sf(aes(fill = RR_mean)) +
+  facet_wrap(~Yr_bttn, dir = "h", ncol = 7) +
+  ggtitle("Relative Risk") +
+  theme_bw() +
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks = element_blank()
+  ) +
+  scale_fill_gradientn(
+    colors = c("blue", "white", "red"),
+    values = scales::rescale(c(min(ward_year$RR_mean), 0.5, max(ward_year$RR_mean))),
+    na.value = "grey50"
+  )
+```
+
+
+
