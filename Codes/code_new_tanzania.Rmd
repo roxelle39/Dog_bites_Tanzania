@@ -45,18 +45,18 @@ conflicts_prefer(dplyr::lag)
 ```
 
 
-# Scale the data
+# Data Import
 ```{r}
 df <- read.csv("/.../.../data/Bite_death_WD_cov.csv")
 
 ward_sf <- st_read("/.../.../data/Ward.shp") 
 ```
-
+# Study Area Map
 ```{r}
 plot(ward_sf["District_N"], main = "Ulanga and Kilombero Districts map")
 
 ```
-
+# Data Cleaning and Preprocessing
 ```{r}
 # Standardization of ward codes
 
@@ -217,7 +217,7 @@ ggplot(season_data, aes(x = Month, y = total_bites, fill = total_bites)) +
 
               y = "Number of bites", x = "")
 ```
-
+# Standardized Incidence Ratio (SIR) Calculation
 ```{r}
 
 taux_ref_year <- df %>%
@@ -256,7 +256,7 @@ sir_year <- df %>%
 
 ```
 
-     
+ # Spatial Mapping of SIR    
 ```{r}
 map_data <- ward_sf %>%
   left_join(sir_year, by = c("wwid" = "wwid"))
