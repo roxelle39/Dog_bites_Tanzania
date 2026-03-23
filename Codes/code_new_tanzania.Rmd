@@ -45,10 +45,11 @@ conflicts_prefer(dplyr::lag)
 ```
 
 
+# Scale the data
 ```{r}
-df <- read.csv("/Users/DELL/Documents/Thesis_AIMS/S_data/Bite_death_WD_cov.csv")
+df <- read.csv("/.../.../data/Bite_death_WD_cov.csv")
 
-ward_sf <- st_read("/Users/DELL/Documents/Thesis_AIMS/S_data/Ward.shp") 
+ward_sf <- st_read("/.../.../data/Ward.shp") 
 ```
 
 ```{r}
