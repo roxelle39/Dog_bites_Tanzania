@@ -1,5 +1,5 @@
 ---
-title: "ANALYSE DES MORSURES DE CHIENS EN TANZANIE"
+title: "ANALYSIS OF DOG BITES IN TANZANIA"
 author: "Rokhaya Diop"
 date: "2025-09-2"
 output:
