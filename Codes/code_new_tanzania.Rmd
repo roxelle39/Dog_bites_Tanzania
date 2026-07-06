@@ -336,39 +336,88 @@ summary(g)
 
 
 ```{r}
+
 inla_df <- sir_year %>%
   mutate(
     id_spatial = as.integer(as.factor(Ward_Cd)),
     id_time = as.integer(as.factor(Yr_bttn)),
-    observed = bit_cnt,               
-    expected = bit_exp , 
-    offset_log = log(pmax(expected, 0.1))  
+    observed = bit_cnt,
+    expected = bit_exp,
+    offset_log = log(pmax(expected, 0.1))
   ) %>%
-   mutate(across(c(
-    elevatn, Ar_kmsq, dogpop, pop_den,
-    totl_ml, totl_fm, prtctd_, lnd_cvr,
-    pvrty_n, ttl_bth,
-    vacc_lag1, vacc_lag2, vacc_lag3,
-    vacc_lag4, vacc_lag12
-  ), scale)) %>%
-  mutate(id_st = as.integer(interaction(id_spatial, id_time, drop=TRUE)))
-
-covariates <- c("elevatn", "pvrty_n", "dogpop", 
-                "pop_den", "Ar_kmsq", "totl_ml", "totl_fm", 
-                "prtctd_", "lnd_cvr", "ttl_bth")
-
-
-build_formula <- function(vars) {
-  f <- paste(vars, collapse = " + ")
-  formula_text <- paste0(
-    "observed ~ -1 + ",
-    "f(id_spatial, model='bym2', graph=g) + ",
-    "f(id_time, model='rw1') + ",
-    "f(id_st, model='iid') + ",
-    f, " + offset(offset_log)"
+  mutate(
+    across(
+      c(
+        elevatn,
+        pvrty_n,
+        dogpop,
+        pop_den,
+        Ar_kmsq,
+        prtctd_,
+        lnd_cvr,
+        ttl_bth
+      ),
+      scale
+    )
+  ) %>%
+  mutate(
+    id_st = as.integer(interaction(id_spatial, id_time, drop = TRUE))
   )
-  as.formula(formula_text)
+
+
+
+covariates <- c(
+  "elevatn",
+  "pvrty_n",
+  "dogpop",
+  "pop_den",
+  "Ar_kmsq",
+  "prtctd_",
+  "lnd_cvr",
+  "ttl_bth"
+)
+
+
+
+build_formula <- function(vars){
+
+  rhs <- paste(vars, collapse = " + ")
+
+  as.formula(
+    paste0(
+      "observed ~ -1 + ",
+      "f(id_spatial, model='bym2', graph=g) + ",
+      "f(id_time, model='rw1') + ",
+      "f(id_st, model='iid') + ",
+      rhs,
+      " + offset(offset_log)"
+    )
+  )
 }
+
+
+
+all_combinations <- unlist(
+  lapply(
+    seq_along(covariates),
+    function(k){
+      combn(covariates, k, simplify = FALSE)
+    }
+  ),
+  recursive = FALSE
+)
+
+cat("Nombre total de combinaisons :", length(all_combinations), "\n")
+
+
+
+families <- c(
+  "nbinomial",
+  "zeroinflatednbinomial1",
+  "zeroinflatednbinomial2"
+)
+
+
 
 selection_results <- data.frame(
   n_vars = integer(),
@@ -379,54 +428,89 @@ selection_results <- data.frame(
   stringsAsFactors = FALSE
 )
 
-for (i in seq_along(covariates)) {
-  
-  vars <- covariates[1:i]
+
+
+counter <- 1
+total_models <- length(all_combinations) * length(families)
+
+for(vars in all_combinations){
+
   formula_tmp <- build_formula(vars)
-  
-  cat("=== Running INLA with covariates:", paste(vars, collapse = ", "), "===\n")
-  
-  families <- c("nbinomial", "zeroinflatednbinomial1", "zeroinflatednbinomial2")
-  
-  for (fam in families) {
-    cat("→ Running INLA for family:", fam, "\n")
-    
+
+  cat("\n====================================\n")
+ cat("Variables :", paste(vars, collapse = ", "), "\n")
+
+  for(fam in families){
+
+    cat("Modèle", counter, "/", total_models, "-", fam, "\n")
+
     try({
-      res <- inla(
+
+      fit <- inla(
         formula = formula_tmp,
         family = fam,
         data = inla_df,
+
         control.predictor = list(compute = TRUE),
-        control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, return.marginals.predictor = TRUE)
+
+        control.compute = list(
+          dic = TRUE,
+          waic = TRUE,
+          cpo = TRUE
+
+    )
       )
-      
+
       selection_results <- rbind(
         selection_results,
         data.frame(
           n_vars = length(vars),
           Covariates = paste(vars, collapse = ", "),
           Family = fam,
-          DIC = res$dic$dic,
-          WAIC = res$waic$waic,
-          stringsAsFactors = FALSE
+          DIC = fit$dic$dic,
+          WAIC = fit$waic$waic
         )
       )
+
     }, silent = TRUE)
+
+    counter <- counter + 1
   }
 }
 
 
-best_index <- which.min(selection_results$DIC)
-cat("\n=== Meilleure formule selon le DIC ===\n")
-cat("Covariables :", selection_results$Covariates[best_index], "\n")
-cat("Famille :", selection_results$Family[best_index], "\n")
-cat("DIC :", selection_results$DIC[best_index], "\n")
-cat("WAIC :", selection_results$WAIC[best_index], "\n")
 
-best_covariates <- strsplit(selection_results$Covariates[best_index], ",\\s*")[[1]]
+selection_results <- selection_results %>%
+  arrange(WAIC)
+
+
+
+
+
+
+
+
+
+best_index <- which.min(selection_results$WAIC)
+
+best_covariates <- strsplit(
+  selection_results$Covariates[best_index],
+  ",\\s*"
+)[[1]]
+
 best_family <- selection_results$Family[best_index]
-best_formula <- build_formula(best_covariates)
 
+cat("\n=============================\n")
+cat("MEILLEUR MODELE\n")
+cat("=============================\n")
+cat("Famille :", best_family, "\n")
+cat("Variables :", paste(best_covariates, collapse = ", "), "\n")
+cat("WAIC :", selection_results$WAIC[best_index], "\n")
+cat("DIC :", selection_results$DIC[best_index], "\n")
+
+
+
+best_formula <- build_formula(best_covariates)
 
 best_model <- inla(
   formula = best_formula,
@@ -435,6 +519,7 @@ best_model <- inla(
   control.predictor = list(compute = TRUE),
   control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE, return.marginals.predictor = TRUE)
 )
+
 ```
 ```{r}
 print(selection_results)
@@ -449,7 +534,15 @@ summary(best_model)
 ```{r}
 best_model$summary.fixed
 ```
-
+```{r}
+vacc_lags <- c(
+  "vacc_lag1",
+  "vacc_lag2",
+  "vacc_lag3",
+  "vacc_lag4",
+  "vacc_lag12"
+)
+```
 ```{r}
 build_formula_lag <- function(lag_var, covars){
 
